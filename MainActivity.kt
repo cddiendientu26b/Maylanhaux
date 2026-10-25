@@ -1,108 +1,307 @@
 package com.nagakawa.ir
 
+import android.app.Activity
+import android.app.AlertDialog
 import android.content.Context
-import android.content.SharedPreferences
 import android.content.pm.PackageManager
+import android.graphics.Color
+import android.graphics.Typeface
 import android.hardware.ConsumerIrManager
 import android.os.Bundle
-import androidx.activity.ComponentActivity
-import androidx.activity.compose.setContent
-import androidx.compose.animation.animateColorAsState
-import androidx.compose.foundation.*
-import androidx.compose.foundation.layout.*
-import androidx.compose.foundation.shape.CircleShape
-import androidx.compose.foundation.shape.RoundedCornerShape
-import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.filled.*
-import androidx.compose.material3.*
-import androidx.compose.runtime.*
-import androidx.compose.ui.Alignment
-import androidx.compose.ui.Modifier
-import androidx.compose.ui.draw.clip
-import androidx.compose.ui.graphics.Color
-import androidx.compose.ui.graphics.vector.ImageVector
-import androidx.compose.ui.text.font.FontFamily
-import androidx.compose.ui.text.font.FontWeight
-import androidx.compose.ui.text.style.TextAlign
-import androidx.compose.ui.text.style.TextOverflow
-import androidx.compose.ui.unit.dp
-import androidx.compose.ui.unit.sp
-import kotlinx.coroutines.Dispatchers
-import kotlinx.coroutines.launch
-import kotlinx.coroutines.sync.Mutex
-import kotlinx.coroutines.sync.withLock
-import kotlinx.coroutines.withContext
+import android.view.Gravity
+import android.view.ViewGroup.LayoutParams.MATCH_PARENT
+import android.view.ViewGroup.LayoutParams.WRAP_CONTENT
+import android.widget.*
 import java.text.SimpleDateFormat
 import java.util.*
+import java.util.concurrent.Executors
 
 enum class AcMode(val label: String, val bits: Int, val hasTemp: Boolean) {
     AUTO("Tự động", 0b000, true), COOL("Mát", 0b001, true),
     HEAT("Nóng", 0b100, true), DRY("Khô", 0b010, true), FAN("Quạt", 0b110, false)
 }
 
-enum class FanSpeed(val label: String, val short: String, val bits: Int) {
-    AUTO("Tự động", "Tự động", 0b101), SPEED_1("Mức 1", "1", 0b011),
-    SPEED_2("Mức 2", "2", 0b010), SPEED_3("Mức 3", "3", 0b001)
+enum class FanSpeed(val label: String, val bits: Int) {
+    AUTO("Tự động", 0b101), S1("1", 0b011), S2("2", 0b010), S3("3", 0b001)
 }
 
 enum class SwingDir(val label: String, val bits: Int) {
-    UP("Lên", 0b001), MID("Giữa", 0b010), DOWN("Xuống", 0b011),
-    SWING("Đảo gió", 0b000), OFF("Đứng yên", 0b111)
+    UP("Lên", 0b001), MID("Giữa", 0b010), DOWN("Xuống", 0b011), SWING("Đảo gió", 0b000), OFF("Đứng yên", 0b111)
 }
 
 enum class ExtraFn(val raw: String, val verified: Boolean) {
-    AUX_HEAT("Aux Heat", false), BODY_FEEL("Body Feel", false),
-    DISPLAY("DISPLAY", true), ECO("ECO", true),
-    HEALTH("Health", true), HUMIDIFICATION("Humidification", false),
+    AUX_HEAT("Aux Heat", false), BODY_FEEL("Body Feel", false), DISPLAY("DISPLAY", true),
+    ECO("ECO", true), HEALTH("Health", true), HUMIDIFICATION("Humidification", false),
     LR_WIND_MODE("LR_WIND_MODE", true), MUTE("MUTE", true), TURBO("TURBO", true)
 }
 
-data class AcState(
-    val power: Boolean = true, val temp: Int = 26, val mode: AcMode = AcMode.COOL,
-    val fan: FanSpeed = FanSpeed.SPEED_3, val swing: SwingDir = SwingDir.UP,
-    val sleep: Boolean = false, val timerHours: Int = 0, val eco: Boolean = false,
-    val turbo: Boolean = false, val display: Boolean = true, val health: Boolean = false,
-    val mute: Boolean = false, val lrWind: Boolean = false, val lastAction: String = "Mặc định"
-) {
-    companion object {
-        fun load(p: SharedPreferences) = AcState(
-            power = p.getBoolean("power", true),
-            temp = p.getInt("temp", 26).coerceIn(16, 30),
-            mode = runCatching { AcMode.valueOf(p.getString("mode", "COOL")!!) }.getOrDefault(AcMode.COOL),
-            fan = runCatching { FanSpeed.valueOf(p.getString("fan", "SPEED_3")!!) }.getOrDefault(FanSpeed.SPEED_3),
-            swing = runCatching { SwingDir.valueOf(p.getString("swing", "UP")!!) }.getOrDefault(SwingDir.UP),
-            sleep = p.getBoolean("sleep", false), timerHours = p.getInt("timer", 0),
-            eco = p.getBoolean("eco", false), turbo = p.getBoolean("turbo", false),
-            display = p.getBoolean("display", true), health = p.getBoolean("health", false),
-            mute = p.getBoolean("mute", false), lrWind = p.getBoolean("lrWind", false),
-            lastAction = "Đã khôi phục trạng thái dự kiến"
-        )
+class MainActivity : Activity() {
+    private val irExecutor = Executors.newSingleThreadExecutor()
+    private var irManager: ConsumerIrManager? = null
 
-        fun save(p: SharedPreferences, s: AcState) = p.edit()
-            .putBoolean("power", s.power).putInt("temp", s.temp).putString("mode", s.mode.name)
-            .putString("fan", s.fan.name).putString("swing", s.swing.name).putBoolean("sleep", s.sleep)
-            .putInt("timer", s.timerHours).putBoolean("eco", s.eco).putBoolean("turbo", s.turbo)
-            .putBoolean("display", s.display).putBoolean("health", s.health).putBoolean("mute", s.mute)
-            .putBoolean("lrWind", s.lrWind).apply()
+    private var power = true
+    private var temp = 26
+    private var mode = AcMode.COOL
+    private var fan = FanSpeed.S3
+    private var swing = SwingDir.UP
+    private var sleep = false
+    private var timerHours = 0
+    private var display = true
+    private var eco = false
+    private var turbo = false
+    private var health = false
+    private var mute = false
+    private var lrWind = false
+
+    private var lastAction = "Khởi tạo"
+    private var txStatus = "Chưa phát lệnh"
+    private var lastHex = "--"
+
+    private lateinit var tvTemp: TextView
+    private lateinit var tvQuickInfo: TextView
+    private lateinit var tvStatusBox: TextView
+    private lateinit var tvActiveFlags: TextView
+    private lateinit var btnPower: Button
+    private lateinit var btnSwing: Button
+    private val modeButtons = mutableMapOf<AcMode, Button>()
+
+    override fun onCreate(savedInstanceState: Bundle?) {
+        super.onCreate(savedInstanceState)
+        irManager = getSystemService(Context.CONSUMER_IR_SERVICE) as? ConsumerIrManager
+        loadPrefs()
+
+        val rootScroll = ScrollView(this)
+        val mainLayout = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            setPadding(32, 32, 32, 48)
+            setBackgroundColor(Color.parseColor("#F5F6F8"))
+        }
+        rootScroll.addView(mainLayout)
+
+        // Tiêu đề & Nhiệt độ trung tâm
+        mainLayout.addView(TextView(this).apply {
+            text = "Nagakawa Air Conditioner (Profile AUX)"
+            textSize = 18f
+            setTypeface(null, Typeface.BOLD)
+            gravity = Gravity.CENTER
+        })
+
+        tvTemp = TextView(this).apply {
+            textSize = 56f
+            gravity = Gravity.CENTER
+            setPadding(0, 16, 0, 4)
+        }
+        mainLayout.addView(tvTemp)
+
+        mainLayout.addView(TextView(this).apply {
+            text = "Nhiệt độ cài đặt (Trạng thái dự kiến)"
+            textSize = 12f
+            gravity = Gravity.CENTER
+            setTextColor(Color.DKGRAY)
+        })
+
+        tvActiveFlags = TextView(this).apply {
+            textSize = 12f
+            gravity = Gravity.CENTER
+            setPadding(0, 8, 0, 12)
+            setTextColor(Color.parseColor("#0052CC"))
+        }
+        mainLayout.addView(tvActiveFlags)
+
+        // Bảng thông tin nhanh (Chế độ | Tốc độ quạt | Hướng)
+        tvQuickInfo = TextView(this).apply {
+            textSize = 15f
+            setTypeface(null, Typeface.BOLD)
+            gravity = Gravity.CENTER
+            setPadding(24, 24, 24, 24)
+            setBackgroundColor(Color.WHITE)
+        }
+        mainLayout.addView(tvQuickInfo)
+        addSpace(mainLayout, 16)
+
+        // Hàng nút Nguồn & Xoay
+        val rowPowerSwing = row()
+        btnPower = button("Nguồn") {
+            power = !power
+            transmitAndRefresh(if (power) "Nguồn: Đang bật" else "Nguồn: Đang tắt")
+        }
+        btnSwing = button("Xoay") {
+            swing = if (swing == SwingDir.SWING) SwingDir.UP else SwingDir.SWING
+            transmitAndRefresh("Hướng gió: ${swing.label}")
+        }
+        rowPowerSwing.addView(btnPower, weightParams())
+        rowPowerSwing.addView(btnSwing, weightParams())
+        mainLayout.addView(rowPowerSwing)
+        addSpace(mainLayout, 12)
+
+        // Thanh điều chỉnh nhiệt độ (- | Nhiệt độ | +)
+        val rowTemp = row()
+        rowTemp.addView(button("− Giảm 1°C") { changeTemp(-1) }, weightParams())
+        rowTemp.addView(button("+ Tăng 1°C") { changeTemp(1) }, weightParams())
+        mainLayout.addView(rowTemp)
+        addSpace(mainLayout, 16)
+
+        // 5 Nút Chế độ hoạt động (Tự động, Mát, Nóng, Khô, Quạt)
+        val rowModes = row()
+        AcMode.entries.forEach { m ->
+            val b = button(m.label) {
+                mode = m
+                if (m != AcMode.COOL) eco = false
+                if (m != AcMode.COOL && m != AcMode.HEAT) turbo = false
+                transmitAndRefresh("Chế độ: ${m.label}")
+            }
+            modeButtons[m] = b
+            rowModes.addView(b, weightParams())
+        }
+        mainLayout.addView(rowModes)
+        addSpace(mainLayout, 12)
+
+        // 5 Nút chức năng bổ sung (Ngủ, Hẹn giờ, Hướng, Quạt, Thêm)
+        val rowAux = row()
+        rowAux.addView(button("Ngủ") {
+            sleep = !sleep
+            transmitAndRefresh(if (sleep) "Ngủ: Đang bật" else "Ngủ: Đang tắt")
+        }, weightParams())
+        rowAux.addView(button("Hẹn giờ") { showTimerDialog() }, weightParams())
+        rowAux.addView(button("Hướng") {
+            swing = SwingDir.entries[(swing.ordinal + 1) % SwingDir.entries.size]
+            transmitAndRefresh("Hướng: ${swing.label}")
+        }, weightParams())
+        rowAux.addView(button("Quạt") {
+            fan = FanSpeed.entries[(fan.ordinal + 1) % FanSpeed.entries.size]
+            transmitAndRefresh("Tốc độ quạt: ${fan.label}")
+        }, weightParams())
+        rowAux.addView(button("Thêm") { showExtraFunctionsDialog() }, weightParams())
+        mainLayout.addView(rowAux)
+        addSpace(mainLayout, 16)
+
+        // Bảng 3 tầng trạng thái & Đồng bộ
+        tvStatusBox = TextView(this).apply {
+            textSize = 12f
+            setPadding(24, 24, 24, 24)
+            setBackgroundColor(Color.WHITE)
+        }
+        mainLayout.addView(tvStatusBox)
+
+        val rowSync = row()
+        rowSync.addView(button("Phát đồng bộ lại") {
+            transmitAndRefresh("Đồng bộ lại trạng thái dự kiến")
+        }, weightParams())
+        rowSync.addView(button("Đặt lại mặc định") {
+            power = true; temp = 26; mode = AcMode.COOL; fan = FanSpeed.S3; swing = SwingDir.UP
+            sleep = false; timerHours = 0; display = true; eco = false; turbo = false
+            health = false; mute = false; lrWind = false
+            lastAction = "Đặt lại mặc định"; txStatus = "Chưa phát lệnh"
+            savePrefs(); updateUi()
+        }, weightParams())
+        mainLayout.addView(rowSync)
+
+        setContentView(rootScroll)
+        updateUi()
     }
-}
 
-object Aux13ByteProtocol {
-    const val FREQ_HZ = 38000
+    private fun changeTemp(delta: Int) {
+        if (!power) { toast("Máy đang ở trạng thái TẮT. Hãy bật Nguồn trước."); return }
+        if (!mode.hasTemp) { toast("Chế độ ${mode.label} không hỗ trợ chỉnh nhiệt độ."); return }
+        val next = temp + delta
+        if (next !in 16..30) { toast("Giới hạn nhiệt độ từ 16°C đến 30°C."); return }
+        temp = next
+        transmitAndRefresh("Nhiệt độ: ${temp}°C")
+    }
 
-    fun encode(s: AcState, toggleDisplay: Boolean = false): Pair<IntArray, String> {
+    private fun showTimerDialog() {
+        val options = arrayOf("Tắt hẹn giờ (0h)", "1 giờ", "2 giờ", "4 giờ", "8 giờ", "12 giờ")
+        val values = intArrayOf(0, 1, 2, 4, 8, 12)
+        AlertDialog.Builder(this)
+            .setTitle("Bộ hẹn giờ (Timer)")
+            .setItems(options) { _, which ->
+                timerHours = values[which]
+                transmitAndRefresh(if (timerHours == 0) "Hẹn giờ: Đang tắt" else "Hẹn giờ: ${timerHours}h")
+            }.show()
+    }
+
+    private fun showExtraFunctionsDialog() {
+        val items = ExtraFn.entries.map { fn ->
+            val st = when (fn) {
+                ExtraFn.DISPLAY -> if (display) "Đang bật" else "Đang tắt"
+                ExtraFn.ECO -> if (eco) "Đang bật" else "Đang tắt"
+                ExtraFn.HEALTH -> if (health) "Đang bật" else "Đang tắt"
+                ExtraFn.LR_WIND_MODE -> if (lrWind) "Đang bật" else "Đang tắt"
+                ExtraFn.MUTE -> if (mute) "Đang bật" else "Đang tắt"
+                ExtraFn.TURBO -> if (turbo) "Đang bật" else "Đang tắt"
+                else -> "Chưa xác minh (Khóa phát IR giả)"
+            }
+            "${fn.raw} — [$st]"
+        }.toTypedArray()
+
+        AlertDialog.Builder(this)
+            .setTitle("Chức năng điều khiển khác")
+            .setItems(items) { _, idx ->
+                val fn = ExtraFn.entries[idx]
+                if (!fn.verified) {
+                    txStatus = "Đã chặn phát IR: ${fn.raw} chưa xác minh"
+                    toast("${fn.raw}: Chưa xác minh mã IR trên Nagakawa")
+                    updateUi()
+                    return@setItems
+                }
+                when (fn) {
+                    ExtraFn.DISPLAY -> { display = !display; transmitAndRefresh("DISPLAY: ${if (display) "Đang bật" else "Đang tắt"}", toggleDisplay = true) }
+                    ExtraFn.ECO -> if (mode != AcMode.COOL) toast("ECO chỉ dùng ở chế độ Mát") else { eco = !eco; if (eco) turbo = false; transmitAndRefresh("ECO: ${if (eco) "Đang bật" else "Đang tắt"}") }
+                    ExtraFn.TURBO -> if (mode != AcMode.COOL && mode != AcMode.HEAT) toast("TURBO chỉ dùng ở Mát/Nóng") else { turbo = !turbo; if (turbo) eco = false; transmitAndRefresh("TURBO: ${if (turbo) "Đang bật" else "Đang tắt"}") }
+                    ExtraFn.HEALTH -> { health = !health; transmitAndRefresh("Health: ${if (health) "Đang bật" else "Đang tắt"}") }
+                    ExtraFn.LR_WIND_MODE -> { lrWind = !lrWind; transmitAndRefresh("LR_WIND_MODE: ${if (lrWind) "Đang bật" else "Đang tắt"}") }
+                    ExtraFn.MUTE -> { mute = !mute; transmitAndRefresh("MUTE: ${if (mute) "Đang bật" else "Đang tắt"}") }
+                    else -> {}
+                }
+            }
+            .setNegativeButton("Đóng", null)
+            .show()
+    }
+
+    private fun transmitAndRefresh(action: String, toggleDisplay: Boolean = false) {
+        lastAction = action
+        savePrefs()
+        val (pulses, hex) = encodeAux13Byte(toggleDisplay)
+        lastHex = hex
+        updateUi()
+
+        irExecutor.execute {
+            val time = SimpleDateFormat("HH:mm:ss", Locale.getDefault()).format(Date())
+            val hasFeature = packageManager.hasSystemFeature(PackageManager.FEATURE_CONSUMER_IR)
+            val hasEmitter = runCatching { irManager?.hasIrEmitter() == true }.getOrDefault(false)
+            val supports38k = runCatching {
+                irManager?.carrierFrequencies?.any { 38000 in it.minFrequency..it.maxFrequency } == true
+            }.getOrDefault(false)
+
+            val resultMsg = if (!hasFeature || !hasEmitter || irManager == null) {
+                "[$time] LỖI: Điện thoại không có bộ phát IR Blaster"
+            } else if (!supports38k) {
+                "[$time] LỖI: Phần cứng IR không hỗ trợ tần số 38kHz"
+            } else {
+                runCatching {
+                    irManager!!.transmit(38000, pulses)
+                    "[$time] Đã gửi lệnh ($action) – Chưa xác nhận từ điều hòa"
+                }.getOrElse { "[$time] Lỗi phát IR: ${it.message}" }
+            }
+
+            runOnUiThread {
+                txStatus = resultMsg
+                updateUi()
+            }
+        }
+    }
+
+    private fun encodeAux13Byte(toggleDisplay: Boolean): Pair<IntArray, String> {
         val f = IntArray(13)
         f[0] = 0xC3
-        f[1] = (((s.temp.coerceIn(16, 30) - 8) and 0x1F) shl 3) or (s.swing.bits and 0x07)
-        f[2] = (if (s.lrWind) 0b000 else 0b111) shl 5
-        f[4] = (s.fan.bits and 0x07) shl 5
-        f[5] = (if (s.turbo && (s.mode == AcMode.COOL || s.mode == AcMode.HEAT)) 1 shl 6 else 0) or
-            (if (s.mute) 1 shl 7 else 0)
-        f[6] = ((s.mode.bits and 0x07) shl 5) or (if (s.sleep) 1 shl 2 else 0)
-        f[7] = s.timerHours.coerceIn(0, 24)
+        f[1] = (((temp.coerceIn(16, 30) - 8) and 0x1F) shl 3) or (swing.bits and 0x07)
+        f[2] = (if (lrWind) 0b000 else 0b111) shl 5
+        f[4] = (fan.bits and 0x07) shl 5
+        f[5] = (if (turbo && (mode == AcMode.COOL || mode == AcMode.HEAT)) 1 shl 6 else 0) or (if (mute) 1 shl 7 else 0)
+        f[6] = ((mode.bits and 0x07) shl 5) or (if (sleep) 1 shl 2 else 0)
+        f[7] = timerHours.coerceIn(0, 24)
         f[8] = if (f[7] > 0) (1 shl 3) else 0
-        f[9] = (if (s.power) 1 shl 5 else 0) or (if (s.eco && s.mode == AcMode.COOL) 1 shl 4 else 0) or
-            (if (s.health) 1 shl 2 else 0)
+        f[9] = (if (power) 1 shl 5 else 0) or (if (eco && mode == AcMode.COOL) 1 shl 4 else 0) or (if (health) 1 shl 2 else 0)
         f[11] = if (toggleDisplay) 0x05 else 0x00
         f[12] = (0..11).sumOf { f[it] } and 0xFF
 
@@ -118,358 +317,65 @@ object Aux13ByteProtocol {
         pulses[i++] = 560; pulses[i] = 10000
         return pulses to f.joinToString(" ") { "%02X".format(it) }
     }
-}
 
-class IrController(ctx: Context) {
-    private val appCtx = ctx.applicationContext
-    private val ir = appCtx.getSystemService(Context.CONSUMER_IR_SERVICE) as? ConsumerIrManager
-    private val mutex = Mutex()
+    private fun updateUi() {
+        tvTemp.text = if (!power) "TẮT" else if (!mode.hasTemp) "--" else "${temp}°C"
+        tvQuickInfo.text = "Chế độ: ${mode.label}   |   Quạt: ${fan.label}   |   Hướng: ${swing.label}"
 
-    fun checkHardware(): Pair<Boolean, String> {
-        val hasFeature = appCtx.packageManager.hasSystemFeature(PackageManager.FEATURE_CONSUMER_IR)
-        val hasEmitter = runCatching { ir?.hasIrEmitter() == true }.getOrDefault(false)
-        if (!hasFeature || !hasEmitter || ir == null) {
-            return false to "Thiết bị KHÔNG có mắt phát hồng ngoại (IR Blaster)"
+        val flags = mutableListOf(if (power) "Nguồn: BẬT" else "Nguồn: TẮT")
+        if (eco) flags.add("ECO: Đang bật")
+        if (turbo) flags.add("TURBO: Đang bật")
+        if (sleep) flags.add("Ngủ: Đang bật")
+        if (timerHours > 0) flags.add("Hẹn giờ: ${timerHours}h")
+        if (health) flags.add("Health: Đang bật")
+        if (mute) flags.add("MUTE: Đang bật")
+        if (lrWind) flags.add("LR_WIND: Đang bật")
+        flags.add(if (display) "DISPLAY: Bật" else "DISPLAY: Tắt")
+        tvActiveFlags.text = flags.joinToString(" • ")
+
+        btnPower.text = if (power) "Nguồn (Đang bật)" else "Nguồn (Đang tắt)"
+        btnPower.setBackgroundColor(if (power) Color.parseColor("#1E8E3E") else Color.parseColor("#D32F2F"))
+        btnPower.setTextColor(Color.WHITE)
+
+        val isSwinging = swing == SwingDir.SWING
+        btnSwing.text = if (isSwinging) "Xoay (Đang bật)" else "Xoay (${swing.label})"
+        btnSwing.setBackgroundColor(if (isSwinging) Color.parseColor("#0066FF") else Color.LTGRAY)
+        btnSwing.setTextColor(if (isSwinging) Color.WHITE else Color.BLACK)
+
+        modeButtons.forEach { (m, btn) ->
+            val selected = m == mode
+            btn.setBackgroundColor(if (selected) Color.parseColor("#0066FF") else Color.LTGRAY)
+            btn.setTextColor(if (selected) Color.WHITE else Color.BLACK)
         }
-        val okFreq = runCatching {
-            ir.carrierFrequencies?.any { Aux13ByteProtocol.FREQ_HZ in it.minFrequency..it.maxFrequency } == true
-        }.getOrDefault(false)
-        return if (okFreq) true to "Sẵn sàng phát IR (38 kHz - Profile AUX 13-Byte)"
-        else false to "Phần cứng IR không hỗ trợ tần số 38 kHz"
+
+        val hasIr = runCatching { irManager?.hasIrEmitter() == true }.getOrDefault(false)
+        tvStatusBox.text =
+            "1. Trạng thái giao diện (Dự kiến): $lastAction\n" +
+            "2. Trạng thái lệnh IR: $txStatus\n" +
+            "3. Xác nhận từ điều hòa: Chưa xác nhận (IR 1 chiều - Có thể lệch nếu dùng điều khiển vật lý)\n" +
+            "• Phần cứng IR trên máy: ${if (hasIr) "Sẵn sàng (38kHz)" else "KHÔNG CÓ IR BLASTER"}\n" +
+            "• Khung AUX 13-byte: $lastHex"
     }
 
-    suspend fun transmit(pulses: IntArray): Result<Unit> = withContext(Dispatchers.IO) {
-        mutex.withLock {
-            val (ready, msg) = checkHardware()
-            if (!ready || ir == null) return@withLock Result.failure(IllegalStateException(msg))
-            runCatching { ir.transmit(Aux13ByteProtocol.FREQ_HZ, pulses) }
-        }
+    private fun savePrefs() = getSharedPreferences("ac", MODE_PRIVATE).edit()
+        .putBoolean("p", power).putInt("t", temp).putString("m", mode.name)
+        .putString("f", fan.name).putString("s", swing.name).putBoolean("sl", sleep)
+        .putInt("tm", timerHours).putBoolean("d", display).putBoolean("e", eco)
+        .putBoolean("tb", turbo).putBoolean("h", health).putBoolean("mt", mute).putBoolean("lr", lrWind).apply()
+
+    private fun loadPrefs() = getSharedPreferences("ac", MODE_PRIVATE).let { p ->
+        power = p.getBoolean("p", true); temp = p.getInt("t", 26).coerceIn(16, 30)
+        mode = runCatching { AcMode.valueOf(p.getString("m", "COOL")!!) }.getOrDefault(AcMode.COOL)
+        fan = runCatching { FanSpeed.valueOf(p.getString("f", "S3")!!) }.getOrDefault(FanSpeed.S3)
+        swing = runCatching { SwingDir.valueOf(p.getString("s", "UP")!!) }.getOrDefault(SwingDir.UP)
+        sleep = p.getBoolean("sl", false); timerHours = p.getInt("tm", 0); display = p.getBoolean("d", true)
+        eco = p.getBoolean("e", false); turbo = p.getBoolean("tb", false); health = p.getBoolean("h", false)
+        mute = p.getBoolean("mt", false); lrWind = p.getBoolean("lr", false)
     }
+
+    private fun row() = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL }
+    private fun weightParams() = LinearLayout.LayoutParams(0, WRAP_CONTENT, 1f).apply { setMargins(6, 6, 6, 6) }
+    private fun addSpace(parent: LinearLayout, dp: Int) = parent.addView(Space(this), LinearLayout.LayoutParams(MATCH_PARENT, dp))
+    private fun button(lbl: String, onClick: () -> Unit) = Button(this).apply { text = lbl; textSize = 12f; isAllCaps = false; setOnClickListener { onClick() } }
+    private fun toast(msg: String) = Toast.makeText(this, msg, Toast.LENGTH_SHORT).show()
 }
-
-class MainActivity : ComponentActivity() {
-    override fun onCreate(savedInstanceState: Bundle?) {
-        super.onCreate(savedInstanceState)
-        val prefs = getSharedPreferences("nagakawa_ir", Context.MODE_PRIVATE)
-        val irController = IrController(this)
-
-        setContent {
-            val dark = isSystemInDarkTheme()
-            val blue = Color(0xFF0066FF)
-            val scheme = if (dark) darkColorScheme(primary = blue, background = Color(0xFF101318), surface = Color(0xFF1B2028))
-            else lightColorScheme(primary = blue, background = Color(0xFFF5F6F8), surface = Color.White)
-
-            MaterialTheme(colorScheme = scheme) {
-                var state by remember { mutableStateOf(AcState.load(prefs)) }
-                var hwInfo by remember { mutableStateOf(irController.checkHardware()) }
-                var txStatus by remember { mutableStateOf("Chưa phát lệnh trong phiên này") }
-                var lastHex by remember { mutableStateOf("Chưa có gói IR") }
-                var showMore by remember { mutableStateOf(false) }
-                var showTimer by remember { mutableStateOf(false) }
-                val snackbar = remember { SnackbarHostState() }
-                val scope = rememberCoroutineScope()
-
-                fun notify(msg: String) = scope.launch {
-                    snackbar.currentSnackbarData?.dismiss()
-                    snackbar.showSnackbar(msg, duration = SnackbarDuration.Short)
-                }
-
-                fun sendState(newState: AcState, action: String, toggleDisplay: Boolean = false) {
-                    val updated = newState.copy(lastAction = action)
-                    state = updated
-                    AcState.save(prefs, updated)
-                    val (pulses, hex) = Aux13ByteProtocol.encode(updated, toggleDisplay)
-                    lastHex = hex
-                    scope.launch {
-                        val time = SimpleDateFormat("HH:mm:ss", Locale.getDefault()).format(Date())
-                        irController.transmit(pulses).onSuccess {
-                            txStatus = "[$time] Đã gửi lệnh ($action) – Chưa xác nhận từ điều hòa"
-                            notify("Đã gửi lệnh: $action (Chưa xác nhận)")
-                        }.onFailure { e ->
-                            txStatus = "[$time] Lỗi phát IR: ${e.message}"
-                            notify(e.message ?: "Không thể phát IR")
-                        }
-                    }
-                }
-
-                Scaffold(
-                    snackbarHost = { SnackbarHost(snackbar) },
-                    topBar = {
-                        @OptIn(ExperimentalMaterial3Api::class)
-                        TopAppBar(
-                            title = {
-                                Column {
-                                    Text("Nagakawa Air Conditioner", fontSize = 18.sp, fontWeight = FontWeight.Bold)
-                                    Text(hwInfo.second, fontSize = 11.sp, color = if (hwInfo.first) Color(0xFF1E8E3E) else Color(0xFFD32F2F))
-                                }
-                            },
-                            actions = {
-                                IconButton(onClick = { hwInfo = irController.checkHardware(); notify(hwInfo.second) }) {
-                                    Icon(Icons.Default.Sensors, "Kiểm tra IR")
-                                }
-                            }
-                        )
-                    }
-                ) { pad ->
-                    Column(
-                        modifier = Modifier.fillMaxSize().padding(pad).verticalScroll(rememberScrollState()).padding(16.dp),
-                        horizontalAlignment = Alignment.CenterHorizontally
-                    ) {
-                        // Bảng 3 tầng trạng thái
-                        Card(
-                            modifier = Modifier.fillMaxWidth(),
-                            shape = RoundedCornerShape(18.dp),
-                            colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface)
-                        ) {
-                            Column(Modifier.padding(12.dp)) {
-                                Text("1. Trạng thái dự kiến (UI): ${state.lastAction}", fontSize = 12.sp, fontWeight = FontWeight.Medium)
-                                Text("2. Lệnh đã phát: $txStatus", fontSize = 12.sp)
-                                Text("3. Thiết bị xác nhận: Chưa xác nhận (IR 1 chiều - Có thể lệch nếu dùng điều khiển rời)", fontSize = 11.sp, color = Color(0xFFE65100))
-                                Text("HEX: $lastHex", fontSize = 10.sp, fontFamily = FontFamily.Monospace, color = Color.Gray)
-                                Spacer(Modifier.height(8.dp))
-                                Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                                    Button(onClick = { sendState(state, "Phát đồng bộ lại") }, modifier = Modifier.weight(1f)) {
-                                        Text("Phát đồng bộ lại", fontSize = 12.sp)
-                                    }
-                                    OutlinedButton(onClick = {
-                                        state = AcState(); AcState.save(prefs, state)
-                                        txStatus = "Đã đặt lại mặc định"; notify("Đã đặt lại mặc định")
-                                    }, modifier = Modifier.weight(1f)) {
-                                        Text("Đặt lại mặc định", fontSize = 12.sp)
-                                    }
-                                }
-                            }
-                        }
-
-                        Spacer(Modifier.height(16.dp))
-                        Text(
-                            text = if (!state.power) "TẮT" else if (!state.mode.hasTemp) "--" else "${state.temp}°C",
-                            fontSize = 68.sp, fontWeight = FontWeight.Light
-                        )
-                        Text("Nhiệt độ cài đặt", fontSize = 14.sp, color = Color.Gray)
-                        Spacer(Modifier.height(8.dp))
-
-                        // Chip hiển thị rõ trạng thái bật/tắt
-                        @OptIn(ExperimentalLayoutApi::class)
-                        FlowRow(horizontalArrangement = Arrangement.spacedBy(6.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
-                            AssistChip(onClick = {}, label = { Text(if (state.power) "Nguồn: Đang bật" else "Nguồn: Đang tắt", fontSize = 11.sp) })
-                            if (state.eco) AssistChip(onClick = {}, label = { Text("ECO: Đang bật", fontSize = 11.sp) })
-                            if (state.turbo) AssistChip(onClick = {}, label = { Text("TURBO: Đang bật", fontSize = 11.sp) })
-                            if (state.sleep) AssistChip(onClick = {}, label = { Text("Ngủ: Đang bật", fontSize = 11.sp) })
-                            if (state.timerHours > 0) AssistChip(onClick = {}, label = { Text("Hẹn giờ: ${state.timerHours}h", fontSize = 11.sp) })
-                            if (state.health) AssistChip(onClick = {}, label = { Text("Health: Đang bật", fontSize = 11.sp) })
-                            if (state.mute) AssistChip(onClick = {}, label = { Text("MUTE: Đang bật", fontSize = 11.sp) })
-                            if (state.lrWind) AssistChip(onClick = {}, label = { Text("LR_WIND: Đang bật", fontSize = 11.sp) })
-                            AssistChip(onClick = {}, label = { Text(if (state.display) "DISPLAY: Đang bật" else "DISPLAY: Đang tắt", fontSize = 11.sp) })
-                        }
-
-                        Spacer(Modifier.height(14.dp))
-
-                        // Bảng thông tin nhanh 3 cột
-                        Surface(shape = RoundedCornerShape(18.dp), color = MaterialTheme.colorScheme.surfaceVariant, modifier = Modifier.fillMaxWidth()) {
-                            Row(Modifier.padding(vertical = 14.dp), horizontalArrangement = Arrangement.SpaceEvenly) {
-                                InfoCol(state.mode.label, "Chế độ")
-                                InfoCol(state.fan.short, "Tốc độ quạt")
-                                InfoCol(state.swing.label, "Hướng")
-                            }
-                        }
-
-                        Spacer(Modifier.height(14.dp))
-
-                        // Hai nút Nguồn & Xoay
-                        Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(12.dp)) {
-                            BigPillButton(
-                                title = "Nguồn", sub = if (state.power) "Đang bật" else "Đang tắt",
-                                icon = Icons.Default.PowerSettingsNew, active = state.power,
-                                activeColor = Color(0xFF1E8E3E), modifier = Modifier.weight(1f)
-                            ) { sendState(state.copy(power = !state.power), if (!state.power) "Nguồn: Đang bật" else "Nguồn: Đang tắt") }
-
-                            val isSwing = state.swing == SwingDir.SWING
-                            BigPillButton(
-                                title = "Xoay", sub = if (isSwing) "Đảo gió: Bật" else state.swing.label,
-                                icon = Icons.Default.SwapVert, active = isSwing,
-                                activeColor = blue, modifier = Modifier.weight(1f)
-                            ) {
-                                val next = if (isSwing) SwingDir.UP else SwingDir.SWING
-                                sendState(state.copy(swing = next), "Hướng gió: ${next.label}")
-                            }
-                        }
-
-                        Spacer(Modifier.height(14.dp))
-
-                        // Thanh tăng giảm nhiệt độ
-                        Surface(shape = RoundedCornerShape(32.dp), color = MaterialTheme.colorScheme.surface, modifier = Modifier.fillMaxWidth().height(64.dp)) {
-                            Row(Modifier.fillMaxSize().padding(horizontal = 12.dp), verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.SpaceBetween) {
-                                IconButton(onClick = {
-                                    if (!state.power) notify("Hãy bật Nguồn trước")
-                                    else if (!state.mode.hasTemp) notify("Chế độ Quạt không chỉnh được nhiệt độ")
-                                    else if (state.temp > 16) sendState(state.copy(temp = state.temp - 1), "Nhiệt độ: ${state.temp - 1}°C")
-                                    else notify("Đã đạt mức thấp nhất 16°C")
-                                }) { Icon(Icons.Default.Remove, "Giảm") }
-
-                                Text("Nhiệt độ (${state.temp}°C)", fontSize = 17.sp, fontWeight = FontWeight.Medium)
-
-                                IconButton(onClick = {
-                                    if (!state.power) notify("Hãy bật Nguồn trước")
-                                    else if (!state.mode.hasTemp) notify("Chế độ Quạt không chỉnh được nhiệt độ")
-                                    else if (state.temp < 30) sendState(state.copy(temp = state.temp + 1), "Nhiệt độ: ${state.temp + 1}°C")
-                                    else notify("Đã đạt mức cao nhất 30°C")
-                                }) { Icon(Icons.Default.Add, "Tăng") }
-                            }
-                        }
-
-                        Spacer(Modifier.height(14.dp))
-
-                        // 5 Nút chế độ hoạt động
-                        Card(shape = RoundedCornerShape(22.dp), colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface), modifier = Modifier.fillMaxWidth()) {
-                            Row(Modifier.fillMaxWidth().padding(vertical = 14.dp), horizontalArrangement = Arrangement.SpaceEvenly) {
-                                val icons = listOf(Icons.Default.HdrAuto, Icons.Default.AcUnit, Icons.Default.WbSunny, Icons.Default.WaterDrop, Icons.Default.Air)
-                                AcMode.entries.forEachIndexed { idx, m ->
-                                    CircleIconBtn(m.label, null, icons[idx], state.mode == m) {
-                                        sendState(
-                                            state.copy(
-                                                mode = m,
-                                                eco = if (m == AcMode.COOL) state.eco else false,
-                                                turbo = if (m == AcMode.COOL || m == AcMode.HEAT) state.turbo else false
-                                            ),
-                                            "Chế độ: ${m.label}"
-                                        )
-                                    }
-                                }
-                            }
-                        }
-
-                        Spacer(Modifier.height(14.dp))
-
-                        // 5 Nút chức năng bổ sung
-                        Card(shape = RoundedCornerShape(22.dp), colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface), modifier = Modifier.fillMaxWidth()) {
-                            Row(Modifier.fillMaxWidth().padding(vertical = 14.dp), horizontalArrangement = Arrangement.SpaceEvenly) {
-                              CircleIconBtn("Ngủ", if (state.sleep) "Bật" else "Tắt", Icons.Default.Bedtime, state.sleep) {
-                                    sendState(state.copy(sleep = !state.sleep), if (!state.sleep) "Ngủ: Đang bật" else "Ngủ: Đang tắt")
-                                }
-                                CircleIconBtn("Bộ hẹn giờ", if (state.timerHours > 0) "${state.timerHours}h" else "Tắt", Icons.Default.Timer, state.timerHours > 0) {
-                                    showTimer = true
-                                }
-                                CircleIconBtn("Hướng", state.swing.label, Icons.Default.SwapVert, state.swing == SwingDir.SWING) {
-                                    val next = SwingDir.entries[(state.swing.ordinal + 1) % SwingDir.entries.size]
-                                    sendState(state.copy(swing = next), "Hướng: ${next.label}")
-                                }
-                                CircleIconBtn("Tốc độ quạt", state.fan.short, Icons.Default.Speed, state.fan != FanSpeed.AUTO) {
-                                    val next = FanSpeed.entries[(state.fan.ordinal + 1) % FanSpeed.entries.size]
-                                    sendState(state.copy(fan = next), "Tốc độ quạt: ${next.label}")
-                                }
-                                CircleIconBtn("Thêm", "Mở rộng", Icons.Default.GridView, state.eco || state.turbo || state.health || state.mute || state.lrWind) {
-                                    showMore = true
-                                }
-                            }
-                        }
-                    }
-                }
-
-                // Bảng "Chức năng điều khiển khác" (9 nút)
-                if (showMore) {
-                    @OptIn(ExperimentalMaterial3Api::class)
-                    ModalBottomSheet(onDismissRequest = { showMore = false }) {
-                        Column(Modifier.fillMaxWidth().padding(horizontal = 20.dp, vertical = 12.dp), horizontalAlignment = Alignment.CenterHorizontally) {
-                            Text("Chức năng điều khiển khác", fontSize = 18.sp, fontWeight = FontWeight.Bold)
-                            Spacer(Modifier.height(14.dp))
-                            ExtraFn.entries.chunked(2).forEach { row ->
-                                Row(Modifier.fillMaxWidth().padding(vertical = 6.dp), horizontalArrangement = Arrangement.spacedBy(12.dp)) {
-                                    row.forEach { fn ->
-                                        val isOn = when (fn) {
-                                            ExtraFn.DISPLAY -> state.display; ExtraFn.ECO -> state.eco
-                                            ExtraFn.HEALTH -> state.health; ExtraFn.LR_WIND_MODE -> state.lrWind
-                                            ExtraFn.MUTE -> state.mute; ExtraFn.TURBO -> state.turbo
-                                            else -> false
-                                        }
-                                        val sub = if (!fn.verified) "Chưa xác minh" else if (isOn) "${fn.raw}: Đang bật" else "${fn.raw}: Đang tắt"
-                                        Surface(
-                                            modifier = Modifier.weight(1f).height(62.dp).clip(RoundedCornerShape(31.dp)).clickable {
-                                                if (!fn.verified) {
-                                                    notify("${fn.raw}: Chưa xác minh mã IR trên Nagakawa. Đã khóa phát lệnh giả.")
-                                                    return@clickable
-                                                }
-                                                when (fn) {
-                                                    ExtraFn.DISPLAY -> sendState(state.copy(display = !state.display), if (!state.display) "DISPLAY: Đang bật" else "DISPLAY: Đang tắt", toggleDisplay = true)
-                                                    ExtraFn.ECO -> if (state.mode != AcMode.COOL) notify("ECO chỉ hỗ trợ ở chế độ Mát") else sendState(state.copy(eco = !state.eco, turbo = false), if (!state.eco) "ECO: Đang bật" else "ECO: Đang tắt")
-                                                    ExtraFn.TURBO -> if (state.mode != AcMode.COOL && state.mode != AcMode.HEAT) notify("TURBO chỉ hỗ trợ ở Mát/Nóng") else sendState(state.copy(turbo = !state.turbo, eco = false), if (!state.turbo) "TURBO: Đang bật" else "TURBO: Đang tắt")
-                                                    ExtraFn.HEALTH -> sendState(state.copy(health = !state.health), if (!state.health) "Health: Đang bật" else "Health: Đang tắt")
-                                                    ExtraFn.LR_WIND_MODE -> sendState(state.copy(lrWind = !state.lrWind), if (!state.lrWind) "LR_WIND_MODE: Đang bật" else "LR_WIND_MODE: Đang tắt")
-                                                    ExtraFn.MUTE -> sendState(state.copy(mute = !state.mute), if (!state.mute) "MUTE: Đang bật" else "MUTE: Đang tắt")
-                                                    else -> {}
-                                                }
-                                            },
-                                            color = if (!fn.verified) MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.4f) else if (isOn) blue else MaterialTheme.colorScheme.surfaceVariant
-                                        ) {
-                                            Column(Modifier.fillMaxSize(), verticalArrangement = Arrangement.Center, horizontalAlignment = Alignment.CenterHorizontally) {
-                                                Text(fn.raw, fontWeight = FontWeight.SemiBold, fontSize = 14.sp, color = if (!fn.verified) Color.Gray else if (isOn) Color.White else MaterialTheme.colorScheme.onSurface)
-                                                Text(sub, fontSize = 10.sp, color = if (!fn.verified) Color(0xFFD84315) else if (isOn) Color.White.copy(alpha = 0.9f) else Color.Gray)
-                                            }
-                                        }
-                                    }
-                                    if (row.size == 1) Spacer(Modifier.weight(1f))
-                                }
-                            }
-                            Spacer(Modifier.height(16.dp))
-                        }
-                    }
-                }
-
-                // Hộp thoại Hẹn giờ
-                if (showTimer) {
-                    AlertDialog(
-                        onDismissRequest = { showTimer = false },
-                        title = { Text("Bộ hẹn giờ (Timer)") },
-                        text = {
-                            @OptIn(ExperimentalLayoutApi::class)
-                            FlowRow(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                                listOf(0, 1, 2, 4, 6, 8, 12).forEach { h ->
-                                    Button(onClick = { showTimer = false; sendState(state.copy(timerHours = h), if (h == 0) "Hẹn giờ: Đang tắt" else "Hẹn giờ: ${h}h") }) {
-                                        Text(if (h == 0) "Tắt" else "${h}h")
-                                    }
-                                }
-                            }
-                        },
-                        confirmButton = { TextButton(onClick = { showTimer = false }) { Text("Đóng") } }
-                    )
-                }
-            }
-        }
-    }
-}
-
-@Composable
-fun InfoCol(v: String, l: String) = Column(horizontalAlignment = Alignment.CenterHorizontally) {
-    Text(v, fontSize = 16.sp, fontWeight = FontWeight.Bold)
-    Text(l, fontSize = 12.sp, color = Color.Gray)
-}
-
-@Composable
-fun BigPillButton(title: String, sub: String, icon: ImageVector, active: Boolean, activeColor: Color, modifier: Modifier, onClick: () -> Unit) {
-    val bg by animateColorAsState(if (active) activeColor else MaterialTheme.colorScheme.surface, label = "bg")
-    val fg = if (active) Color.White else MaterialTheme.colorScheme.onSurface
-    Surface(modifier = modifier.height(64.dp).clip(RoundedCornerShape(32.dp)).clickable(onClick = onClick), color = bg, shadowElevation = 2.dp) {
-        Row(Modifier.fillMaxSize().padding(horizontal = 14.dp), verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.Center) {
-            Icon(icon, title, tint = fg)
-            Spacer(Modifier.width(8.dp))
-            Column {
-                Text(title, fontSize = 16.sp, fontWeight = FontWeight.Bold, color = fg)
-                Text(sub, fontSize = 11.sp, color = fg.copy(alpha = 0.85f))
-            }
-        }
-    }
-}
-
-@Composable
-fun CircleIconBtn(title: String, sub: String?, icon: ImageVector, selected: Boolean, onClick: () -> Unit) {
-    val bg by animateColorAsState(if (selected) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.surfaceVariant, label = "c")
-    Column(horizontalAlignment = Alignment.CenterHorizontally, modifier = Modifier.width(62.dp).clip(RoundedCornerShape(12.dp)).clickable(onClick = onClick).padding(vertical = 4.dp)) {
-        Box(Modifier.size(50.dp).clip(CircleShape).background(bg), contentAlignment = Alignment.Center) {
-            Icon(icon, title, tint = if (selected) Color.White else MaterialTheme.colorScheme.onSurface)
-        }
-        Spacer(Modifier.height(4.dp))
-        Text(title, fontSize = 11.sp, maxLines = 1, overflow = TextOverflow.Ellipsis, fontWeight = if (selected) FontWeight.Bold else FontWeight.Normal)
-        if (sub != null) Text(sub, fontSize = 9.sp, color = Color.Gray, maxLines = 1)
-    }
-}
-         
